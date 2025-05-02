@@ -119,3 +119,11 @@ def str_to_datetime(date_time_str):
     except ValueError:
         return False  # Retorna False se a conversão falhar
     
+
+def checkRequiredFields(dados, required_fields):    
+    missing_fields = [field for field in required_fields if not dados.get(field)]
+
+    if missing_fields:
+        raise PermissionDenied(f"Campos obrigatórios ausentes ou vazios: {', '.join(missing_fields)}")
+    return True
+        

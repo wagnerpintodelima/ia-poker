@@ -63,6 +63,8 @@ class Table(models.Model):
         default=600,  # 10 minutos ou 10 mãos, depende da estratégia
         help_text="Intervalo para aumentar as blinds (segundos ou número de mãos)"
     )
+    
+    hands_played = models.PositiveIntegerField(default=0)
 
     STATUS_CHOICES = [
         ('waiting', 'Aguardando jogadores'),
@@ -121,5 +123,54 @@ class TablePlayer(models.Model):
     def __str__(self):
         return f"{self.player.name} @ {self.table.name} (Seat {self.seat_number})"
     
+class GameLog(models.Model):
+    table = models.ForeignKey('Table', on_delete=models.CASCADE, related_name='logs')
+    player = models.ForeignKey('Player', on_delete=models.SET_NULL, null=True, blank=True, related_name='logs')
+
+    LOG_TYPE_CHOICES = [
+        # Fluxo do jogo
+        ('join', 'Entrada na mesa'),
+        ('leave', 'Saída da mesa'),
+        ('start', 'Início da partida'),
+        ('position', 'Distribuição de posições'),
+
+        # Ações do jogador
+        ('fold', 'Desistiu (Fold)'),
+        ('check', 'Passou (Check)'),
+        ('call', 'Pagou (Call)'),
+        ('bet', 'Apostou (Bet)'),
+        ('raise', 'Aumentou (Raise)'),
+        ('allin', 'All-in'),
+
+        # Eventos técnicos ou de controle
+        ('win', 'Vitória'),
+        ('showdown', 'Showdown'),
+        ('info', 'Informação'),
+        ('error', 'Erro de execução'),
+    ]
+    log_type = models.CharField(max_length=20, choices=LOG_TYPE_CHOICES)
     
+    ROUND_STAGE_CHOICES = [
+        ('preflop', 'Pré-flop'),
+        ('flop', 'Flop'),
+        ('turn', 'Turn'),
+        ('river', 'River'),
+        ('showdown', 'Showdown'),
+        ('-', 'Não aplicável'),
+    ]
+    round_stage = models.CharField(max_length=10, choices=ROUND_STAGE_CHOICES, default='-')
     
+    hands_played = models.PositiveIntegerField(default=0)
+    
+    message = models.TextField()
+    json_data = models.JSONField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'game_log'
+        ordering = ['-created_at']  # logs mais recentes primeiro
+
+    def __str__(self):
+        jogador = self.player.name if self.player else 'Sistema'
+        return f"[{self.created_at.strftime('%d/%m %H:%M')}] {self.log_type.upper()} - {jogador}: {self.message}"    

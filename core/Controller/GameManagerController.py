@@ -13,23 +13,165 @@ from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.utils import timezone
-from core.Controller.BaseController import getHash, getAccess, getAccessAdmin
-from core.models import Player, Table, TablePlayer
+from core.Controller.BaseController import getHash, getAccess, getAccessAdmin, checkRequiredFields
+from core.models import Player, Table, TablePlayer, GameLog
 from django.db.models import Q
+import datetime
+from django.db import transaction
 
 
-class GameManagerController:
-    POSITIONS_ORDERED = [
-        'sb', 'bb', 'utg', 'utg+1', 'utg+2', 'lj', 'hj', 'co', 'btn'
-    ]
+
+POSITIONS_ORDERED = [
+    'sb', 'bb', 'utg', 'utg+1', 'utg+2', 'lj', 'hj', 'co', 'btn'
+]
 
 @staticmethod
 def get_positions_for_player_count(player_count: int):
     """
     Retorna a lista de posições de acordo com a quantidade de jogadores ativos.
     """
-    max_players = min(player_count, len(GameManagerController.POSITIONS_ORDERED))
-    return GameManagerController.POSITIONS_ORDERED[:max_players]
+    max_players = min(player_count, len(POSITIONS_ORDERED))
+    return POSITIONS_ORDERED[:max_players]
+
+
+@staticmethod
+def start_game(table):
+    with transaction.atomic():
+        # Atualiza status da mesa
+        table.status = 'active'
+        table.hands_played += 1    
+        table.save()
+        hands_played = table.hands_played
+
+        # Busca jogadores ordenados por seat_number
+        jogadores = TablePlayer.objects.filter(table=table).order_by('seat_number')
+        posicoes = get_positions_for_player_count(jogadores.count())
+
+        for i, jogador in enumerate(jogadores):
+            jogador.position = posicoes[i]
+            jogador.is_in_hand = True
+            jogador.is_eliminated = False
+            jogador.is_all_in = False
+            jogador.save()
+
+            # Cria log de posição
+            GameLog.objects.create(
+                table = table,
+                player = jogador.player,
+                log_type = 'position',
+                round_stage = '-',
+                hands_played = hands_played,
+                message = f"{jogador.player.name} recebeu a posição {jogador.get_position_display()}.",
+                json_data = {
+                    'seat_number': jogador.seat_number,
+                    'position': jogador.position
+                }
+            )
+
+        # Cria log de início da partida
+        GameLog.objects.create(
+            table = table,
+            player = None,
+            log_type = 'start',
+            round_stage = '-',
+            hands_played = hands_played,
+            message = "A partida foi iniciada automaticamente.",
+            json_data = {
+                'players': [jogador.player.name for jogador in jogadores],
+                'total_players': jogadores.count(),
+                'start_time': datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
+            }
+        )
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def joinTable(request):
+    
+    try:
+        with transaction.atomic():
+            getAccess(request)
+
+            dados = json.loads(request.body.decode('utf-8'))
+        
+            checkRequiredFields(dados, ['table_id', 'secret_key'])
+
+            table_id = dados.get('table_id', None)
+            secret_key = dados.get('secret_key', None)
+            
+            table = Table.objects.filter(id=table_id, status='waiting').first()
+            player = Player.objects.filter(secret_key=secret_key).first()
+            
+            # Mesa não disponível
+            if not table:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'A mesa {table.id} não está disponível!'
+                })
+                
+            # Player Não existe            
+            if not player:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'player não encontrado'
+                })     
+                
+            # Player Já está na mesa
+            tablePlayer = TablePlayer.objects.filter(table=table, player=player).first()        
+            if tablePlayer:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'O Jogador {player.name} já está na mesa {table.id}!'
+                })
+            
+            # Vê se tem vaga na mesa
+            ocupados = TablePlayer.objects.filter(table=table).count()
+            if ocupados >= table.max_players:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'A mesa {table.id} está completa. Não foi possível add mais um player nela!'
+                })
+                
+            seat_number = ocupados + 1
+
+            TablePlayer.objects.create(
+                table = table,
+                player = player,
+                seat_number = seat_number,
+                chips = table.initial_chips,
+                is_active = True,
+                is_in_hand = True,
+                position='-'
+            )
+
+            log_event(table, player, 'join', f"{player.name} entrou na mesa.", data={
+                'seat_number': seat_number,
+                'chips': table.initial_chips
+            })
+            
+            # Se juntou todo mundo que os comecem os jogos...
+            if seat_number == table.max_players:
+                start_game(table)
+
+
+            return JsonResponse({
+                'status': 200,
+                'description': f'Jogador {player.name} entrou na mesa com sucesso.',
+                'player': {
+                    'name': player.name,
+                    'seat_number': seat_number,
+                    'chips': table.initial_chips,
+                    'position': '-',
+                    'table_id': table.id
+                }
+            })
+
+    except Exception as e:
+        context = {
+            'status': 500,
+            'description': str(e)
+        }
+
+    return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
 
 @csrf_exempt
 @require_http_methods(["POST"])
@@ -112,4 +254,15 @@ def getTables(request):
 
 
     return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
+
+def log_event(table, player, log_type, message, stage='-', hands=0, data=None):
+    GameLog.objects.create(
+        table=table,
+        player=player,
+        log_type=log_type,
+        round_stage=stage,
+        hands_played=hands,
+        message=message,
+        json_data=data or {}
+    )
 

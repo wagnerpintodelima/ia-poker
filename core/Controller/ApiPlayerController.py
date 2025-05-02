@@ -14,9 +14,11 @@ from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.utils import timezone
-from core.Controller.BaseController import getHash, getAccess, getAccessAdmin
+from core.Controller.BaseController import getHash, getAccess, getAccessAdmin, checkRequiredFields
 from core.models import Player
 from django.db.models import Q
+from django.db import transaction
+
 
 
 @csrf_exempt
@@ -25,17 +27,10 @@ def getPlayer(request):
 
     try:
         dados = json.loads(request.body.decode('utf-8'))
-        getAccess(request)
-
-        required_fields = ['secret_key', 'email']
-        missing_fields = [field for field in required_fields if not dados.get(field)]
-
-        if missing_fields:
-            return JsonResponse({
-                'status': 400,
-                'description': f"Campos obrigatórios ausentes ou vazios: {', '.join(missing_fields)}"
-            })
-    
+        getAccess(request)        
+        
+        checkRequiredFields(dados, ['secret_key', 'email'])
+        
         secret_key = dados.get('secret_key', None)
         email = dados.get('email', None)
         
@@ -86,16 +81,9 @@ def newPlayer(request):
     try:
         dados = json.loads(request.body.decode('utf-8'))
         getAccessAdmin(request)
-
-        required_fields = ['name', 'email', 'callback_url', 'avatar_url']
-        missing_fields = [field for field in required_fields if not dados.get(field)]
-
-        if missing_fields:
-            return JsonResponse({
-                'status': 400,
-                'description': f"Campos obrigatórios ausentes ou vazios: {', '.join(missing_fields)}"
-            })
-
+        
+        checkRequiredFields(dados, ['name', 'email', 'callback_url', 'avatar_url'])
+        
         # Acessando um valor específico | {"deviceNumber":"cf916da6509da698be4854f789b26c01","version": "v4.3.2"}
         name = dados.get('name', None)
         email = dados.get('email', None)
@@ -125,7 +113,6 @@ def newPlayer(request):
 
     return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
 
-
 @csrf_exempt
 @require_http_methods(["GET"])
 def showHash(request):
@@ -146,7 +133,6 @@ def showHash(request):
 
     return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
 
-
 @csrf_exempt
 @require_http_methods(["GET"])
 def genHash(request):
@@ -154,7 +140,7 @@ def genHash(request):
     try:
         dados = json.loads(request.body.decode('utf-8'))
         
-        getAccess(request)
+        getAccessAdmin(request)
 
         # Acessando um valor específico | {"deviceNumber":"cf916da6509da698be4854f789b26c01","version": "v4.3.2"}
         secret_key = dados.get('secret_key', None)        
@@ -165,6 +151,41 @@ def genHash(request):
             'description': fr'Secret Key Received: {secret_key}',
             'secret_key': getHash(secret_key)
         })
+
+    except Exception as e:
+        context = {
+            'status': 500,
+            'description': str(e)
+        }
+
+
+    return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def getPlayers(request):
+
+    try:
+        
+        getAccessAdmin(request)
+        
+        players = Player.objects.filter(is_active=True).values(
+            'id', 'name', 'email', 'callback_url',
+            'secret_key', 'is_bot', 'is_active',
+            'avatar_url', 'created_at', 'updated_at'
+        )
+
+        if players:
+            return JsonResponse({
+                'status': 200,
+                'description': fr'Foi encontrado {len(players)} players ativo.',
+                'players': list(players)
+            })
+        else:                
+            return JsonResponse({
+                'status': 200,
+                'description': 'Não há players ativo'
+            })
 
     except Exception as e:
         context = {
