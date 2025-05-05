@@ -1,5 +1,5 @@
 from django.db import models
-import uuid
+from uuid import uuid4
 
 class Authorization(models.Model):
     level = models.CharField(max_length=100)    
@@ -38,8 +38,7 @@ class Player(models.Model):
 
     def __str__(self):
         return self.name
-    
-    
+        
 class Table(models.Model):
     name = models.CharField(max_length=100)
     max_players = models.PositiveIntegerField(default=6)
@@ -63,6 +62,16 @@ class Table(models.Model):
         default=600,  # 10 minutos ou 10 mãos, depende da estratégia
         help_text="Intervalo para aumentar as blinds (segundos ou número de mãos)"
     )
+    
+    flop1 = models.CharField(max_length=3, blank=True, null=True)
+    flop2 = models.CharField(max_length=3, blank=True, null=True)
+    flop3 = models.CharField(max_length=3, blank=True, null=True)
+    turn = models.CharField(max_length=3, blank=True, null=True)
+    river = models.CharField(max_length=3, blank=True, null=True)
+
+    current_pot = models.PositiveIntegerField(default=0)
+    current_bet = models.PositiveIntegerField(default=0)        # Maior aposta atual
+    last_raise_amount = models.PositiveIntegerField(default=0)  # Incremento do último raise
     
     hands_played = models.PositiveIntegerField(default=0)
 
@@ -93,6 +102,8 @@ class TablePlayer(models.Model):
     chips = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)    # Ainda na mesa
     is_in_hand = models.BooleanField(default=True)   # Participando da mão atual
+    card1 = models.CharField(max_length=3, blank=True, null=True)
+    card2 = models.CharField(max_length=3, blank=True, null=True)
     is_all_in = models.BooleanField(default=False)
     is_eliminated = models.BooleanField(default=False)
 
@@ -123,6 +134,14 @@ class TablePlayer(models.Model):
     def __str__(self):
         return f"{self.player.name} @ {self.table.name} (Seat {self.seat_number})"
     
+ROUND_STAGE_CHOICES = [
+    ('preflop', 'Pré-flop'),
+    ('flop', 'Flop'),
+    ('turn', 'Turn'),
+    ('river', 'River'),
+    ('showdown', 'Showdown'),
+    ('-', 'Não aplicável'),
+]    
 class GameLog(models.Model):
     table = models.ForeignKey('Table', on_delete=models.CASCADE, related_name='logs')
     player = models.ForeignKey('Player', on_delete=models.SET_NULL, null=True, blank=True, related_name='logs')
@@ -148,16 +167,8 @@ class GameLog(models.Model):
         ('info', 'Informação'),
         ('error', 'Erro de execução'),
     ]
-    log_type = models.CharField(max_length=20, choices=LOG_TYPE_CHOICES)
-    
-    ROUND_STAGE_CHOICES = [
-        ('preflop', 'Pré-flop'),
-        ('flop', 'Flop'),
-        ('turn', 'Turn'),
-        ('river', 'River'),
-        ('showdown', 'Showdown'),
-        ('-', 'Não aplicável'),
-    ]
+    log_type = models.CharField(max_length=20, choices=LOG_TYPE_CHOICES)    
+
     round_stage = models.CharField(max_length=10, choices=ROUND_STAGE_CHOICES, default='-')
     
     hands_played = models.PositiveIntegerField(default=0)
@@ -174,3 +185,36 @@ class GameLog(models.Model):
     def __str__(self):
         jogador = self.player.name if self.player else 'Sistema'
         return f"[{self.created_at.strftime('%d/%m %H:%M')}] {self.log_type.upper()} - {jogador}: {self.message}"    
+        
+class PlayerTurnToken(models.Model):
+    table = models.ForeignKey('Table', on_delete=models.CASCADE)
+    player = models.ForeignKey('Player', on_delete=models.CASCADE)        
+
+    token = models.CharField(max_length=64, unique=True, default=uuid4)
+    hands_played = models.PositiveIntegerField(default=0)
+    round_stage = models.CharField(max_length=10, choices=ROUND_STAGE_CHOICES, default='preflop')
+
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'player_turn_token'
+
+    def __str__(self):
+        return f"Turno de {self.player.name} na mesa {self.table.id} - {self.token}"
+
+class ActionState(models.Model):
+    table = models.ForeignKey('Table', on_delete=models.CASCADE)
+    player = models.ForeignKey('Player', on_delete=models.CASCADE)
+
+    stage = models.CharField(max_length=10, choices=ROUND_STAGE_CHOICES)
+    needs_to_act = models.BooleanField(default=True)
+    amount_invested = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('table', 'player', 'stage')
+        db_table = 'action_state'
+
+    def __str__(self):
+        return f"{self.player.name} @ {self.table.id} - {self.stage} - R${self.amount_invested}"
+

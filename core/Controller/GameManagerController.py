@@ -1,9 +1,12 @@
+import requests
 import json
 import threading
 import time
 from datetime import datetime
 from django.shortcuts import get_object_or_404
 import pytz
+from treys import Deck, Card, Evaluator
+import random
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
 from django.http import HttpResponse
 from django.contrib.auth.decorators import login_required
@@ -14,164 +17,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.utils import timezone
 from core.Controller.BaseController import getHash, getAccess, getAccessAdmin, checkRequiredFields
-from core.models import Player, Table, TablePlayer, GameLog
+from core.models import Player, Table, TablePlayer, GameLog, PlayerTurnToken, ActionState
 from django.db.models import Q
 import datetime
 from django.db import transaction
 
-
-
-POSITIONS_ORDERED = [
-    'sb', 'bb', 'utg', 'utg+1', 'utg+2', 'lj', 'hj', 'co', 'btn'
-]
-
-@staticmethod
-def get_positions_for_player_count(player_count: int):
-    """
-    Retorna a lista de posições de acordo com a quantidade de jogadores ativos.
-    """
-    max_players = min(player_count, len(POSITIONS_ORDERED))
-    return POSITIONS_ORDERED[:max_players]
-
-
-@staticmethod
-def start_game(table):
-    with transaction.atomic():
-        # Atualiza status da mesa
-        table.status = 'active'
-        table.hands_played += 1    
-        table.save()
-        hands_played = table.hands_played
-
-        # Busca jogadores ordenados por seat_number
-        jogadores = TablePlayer.objects.filter(table=table).order_by('seat_number')
-        posicoes = get_positions_for_player_count(jogadores.count())
-
-        for i, jogador in enumerate(jogadores):
-            jogador.position = posicoes[i]
-            jogador.is_in_hand = True
-            jogador.is_eliminated = False
-            jogador.is_all_in = False
-            jogador.save()
-
-            # Cria log de posição
-            GameLog.objects.create(
-                table = table,
-                player = jogador.player,
-                log_type = 'position',
-                round_stage = '-',
-                hands_played = hands_played,
-                message = f"{jogador.player.name} recebeu a posição {jogador.get_position_display()}.",
-                json_data = {
-                    'seat_number': jogador.seat_number,
-                    'position': jogador.position
-                }
-            )
-
-        # Cria log de início da partida
-        GameLog.objects.create(
-            table = table,
-            player = None,
-            log_type = 'start',
-            round_stage = '-',
-            hands_played = hands_played,
-            message = "A partida foi iniciada automaticamente.",
-            json_data = {
-                'players': [jogador.player.name for jogador in jogadores],
-                'total_players': jogadores.count(),
-                'start_time': datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
-            }
-        )
-
-@csrf_exempt
-@require_http_methods(["POST"])
-def joinTable(request):
-    
-    try:
-        with transaction.atomic():
-            getAccess(request)
-
-            dados = json.loads(request.body.decode('utf-8'))
-        
-            checkRequiredFields(dados, ['table_id', 'secret_key'])
-
-            table_id = dados.get('table_id', None)
-            secret_key = dados.get('secret_key', None)
-            
-            table = Table.objects.filter(id=table_id, status='waiting').first()
-            player = Player.objects.filter(secret_key=secret_key).first()
-            
-            # Mesa não disponível
-            if not table:
-                return JsonResponse({
-                    'status': 400,
-                    'description': fr'A mesa {table.id} não está disponível!'
-                })
-                
-            # Player Não existe            
-            if not player:
-                return JsonResponse({
-                    'status': 400,
-                    'description': fr'player não encontrado'
-                })     
-                
-            # Player Já está na mesa
-            tablePlayer = TablePlayer.objects.filter(table=table, player=player).first()        
-            if tablePlayer:
-                return JsonResponse({
-                    'status': 400,
-                    'description': fr'O Jogador {player.name} já está na mesa {table.id}!'
-                })
-            
-            # Vê se tem vaga na mesa
-            ocupados = TablePlayer.objects.filter(table=table).count()
-            if ocupados >= table.max_players:
-                return JsonResponse({
-                    'status': 400,
-                    'description': fr'A mesa {table.id} está completa. Não foi possível add mais um player nela!'
-                })
-                
-            seat_number = ocupados + 1
-
-            TablePlayer.objects.create(
-                table = table,
-                player = player,
-                seat_number = seat_number,
-                chips = table.initial_chips,
-                is_active = True,
-                is_in_hand = True,
-                position='-'
-            )
-
-            log_event(table, player, 'join', f"{player.name} entrou na mesa.", data={
-                'seat_number': seat_number,
-                'chips': table.initial_chips
-            })
-            
-            # Se juntou todo mundo que os comecem os jogos...
-            if seat_number == table.max_players:
-                start_game(table)
-
-
-            return JsonResponse({
-                'status': 200,
-                'description': f'Jogador {player.name} entrou na mesa com sucesso.',
-                'player': {
-                    'name': player.name,
-                    'seat_number': seat_number,
-                    'chips': table.initial_chips,
-                    'position': '-',
-                    'table_id': table.id
-                }
-            })
-
-    except Exception as e:
-        context = {
-            'status': 500,
-            'description': str(e)
-        }
-
-    return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
 
 @csrf_exempt
 @require_http_methods(["POST"])
@@ -265,4 +115,649 @@ def log_event(table, player, log_type, message, stage='-', hands=0, data=None):
         message=message,
         json_data=data or {}
     )
+
+@csrf_exempt
+@require_http_methods(["GET"])        
+def treys_tour(request):
+    
+    deck = Deck()
+    evaluator = Evaluator()
+
+    hand1 = [deck.draw(1)[0], deck.draw(1)[0]]
+    hand2 = [deck.draw(1)[0], deck.draw(1)[0]]
+    board = [deck.draw(1)[0] for _ in range(5)]
+
+    score1 = evaluator.evaluate(board, hand1)
+    score2 = evaluator.evaluate(board, hand2)
+
+    winner = "draw"
+    if score1 < score2:
+        winner = "hand1"
+    elif score2 < score1:
+        winner = "hand2"
+
+    # 🎨 Print bonito no console
+    print("\n=== 🃏 IA Poker | Simulação com treys ===")
+    print("Mão 1:")
+    Card.print_pretty_cards(hand1)
+    print("Mão 2:")
+    Card.print_pretty_cards(hand2)
+    print("Board:")
+    Card.print_pretty_cards(board)
+
+    print(f"\nAvaliação:")
+    print(f"🧠 Hand 1: {score1} | {evaluator.class_to_string(evaluator.get_rank_class(score1))}")
+    print(f"🧠 Hand 2: {score2} | {evaluator.class_to_string(evaluator.get_rank_class(score2))}")
+    print(f"\n🏆 Vencedor: {'Empate' if winner == 'draw' else winner.upper()}")
+
+    # 🧾 JSON de retorno (sem ANSI)
+    result = {
+        "hand1": {
+            "cards": [Card.int_to_str(c) for c in hand1],
+            "score": score1,
+            "rank": evaluator.class_to_string(evaluator.get_rank_class(score1))
+        },
+        "hand2": {
+            "cards": [Card.int_to_str(c) for c in hand2],
+            "score": score2,
+            "rank": evaluator.class_to_string(evaluator.get_rank_class(score2))
+        },
+        "board": [Card.int_to_str(c) for c in board],
+        "winner": winner
+    }
+
+    return JsonResponse(result)
+
+###############ROTINA START#####################
+    
+@csrf_exempt
+@require_http_methods(["POST"])
+def joinTable(request):
+    
+    try:
+        with transaction.atomic():
+            getAccess(request)
+
+            dados = json.loads(request.body.decode('utf-8'))
+        
+            checkRequiredFields(dados, ['table_id', 'secret_key'])
+
+            table_id = dados.get('table_id', None)
+            secret_key = dados.get('secret_key', None)
+            
+            table = Table.objects.filter(id=table_id, status='waiting').first()
+            player = Player.objects.filter(secret_key=secret_key).first()
+            
+            # Mesa não disponível
+            if not table:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'A mesa #{table_id} não está disponível!'
+                })
+                
+            # Player Não existe            
+            if not player:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'player não encontrado'
+                })     
+                
+            # Player Já está na mesa
+            tablePlayer = TablePlayer.objects.filter(table=table, player=player).first()        
+            if tablePlayer:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'O Jogador {player.name} já está na mesa {table.id}!'
+                })
+            
+            # Vê se tem vaga na mesa
+            ocupados = TablePlayer.objects.filter(table=table).count()
+            if ocupados >= table.max_players:
+                return JsonResponse({
+                    'status': 400,
+                    'description': fr'A mesa {table.id} está completa. Não foi possível add mais um player nela!'
+                })
+                
+            seat_number = ocupados + 1
+
+            TablePlayer.objects.create(
+                table = table,
+                player = player,
+                seat_number = seat_number,
+                chips = table.initial_chips,
+                is_active = True,
+                is_in_hand = True,
+                position='-'
+            )
+
+            log_event(table, player, 'join', f"{player.name} entrou na mesa.", data={
+                'seat_number': seat_number,
+                'chips': table.initial_chips
+            })
+            
+            # Se juntou todo mundo que os comecem os jogos...
+            if seat_number == table.max_players:
+                start_game(table)            
+
+            return JsonResponse({
+                'status': 200,
+                'description': f'Jogador {player.name} entrou na mesa com sucesso.',
+                'players_in_table': fr'{TablePlayer.objects.filter(table=table).count()}/{table.max_players}',
+                'player': {
+                    'name': player.name,
+                    'seat_number': seat_number,
+                    'chips': table.initial_chips,
+                    'position': '-',
+                    'table_id': table.id
+                }
+            })
+
+    except Exception as e:
+        context = {
+            'status': 500,
+            'description': str(e)
+        }
+
+    return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
+
+POSITIONS_ORDERED = [
+    'sb', 'bb', 'utg', 'utg+1', 'utg+2', 'lj', 'hj', 'co', 'btn'
+]
+
+@staticmethod
+def get_positions_for_player_count(player_count: int):
+    """
+    Retorna a lista de posições de acordo com a quantidade de jogadores ativos.
+    """
+    max_players = min(player_count, len(POSITIONS_ORDERED))
+    return POSITIONS_ORDERED[:max_players]
+
+@staticmethod
+def start_game(table):
+    with transaction.atomic():
+        # Atualiza status da mesa
+        table.status = 'active'
+        table.hands_played += 1    
+        table.save()
+        hands_played = table.hands_played
+
+        # Busca jogadores ordenados por seat_number
+        jogadores = TablePlayer.objects.filter(table=table).order_by('seat_number')
+        posicoes = get_positions_for_player_count(jogadores.count())
+
+        for i, jogador in enumerate(jogadores):
+            jogador.position = posicoes[i]
+            jogador.is_in_hand = True
+            jogador.is_eliminated = False
+            jogador.is_all_in = False
+            jogador.save()
+
+            # Cria log de posição
+            GameLog.objects.create(
+                table = table,
+                player = jogador.player,
+                log_type = 'position',
+                round_stage = '-',
+                hands_played = hands_played,
+                message = f"{jogador.player.name} recebeu a posição {jogador.get_position_display()}.",
+                json_data = {
+                    'seat_number': jogador.seat_number,
+                    'position': jogador.position
+                }
+            )
+
+        # Cria log de início da partida
+        GameLog.objects.create(
+            table = table,
+            player = None,
+            log_type = 'start',
+            round_stage = '-',
+            hands_played = hands_played,
+            message = "A partida foi iniciada automaticamente.",
+            json_data = {
+                'players': [jogador.player.name for jogador in jogadores],
+                'total_players': jogadores.count(),
+                'start_time': datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
+            }
+        )
+    
+    # dispara processo em segundo plano após a transação
+    threading.Thread(
+        target=delayed_setup_hand,
+        args=(table.id, 2)
+    ).start()
+
+def delayed_setup_hand(table_id, delay=5):
+    from core.models import Table  # importa aqui para evitar loop
+    time.sleep(delay)
+    table = Table.objects.get(id=table_id)
+    setup_hand(table)  # essa função você vai criar depois
+
+def setup_hand(table):
+    with transaction.atomic():
+        deck = Deck()
+
+        # Valida as posições na mesa
+        assign_positions(table)
+        
+        # Reinicia os estados de ação para o preflop
+        reset_action_state_for_stage(table, stage='preflop')
+        
+        jogadores = list(
+            TablePlayer.objects.filter(table=table, is_active=True).order_by('seat_number')
+        )
+
+        # Reinicia o board
+        table.flop1 = None
+        table.flop2 = None
+        table.flop3 = None
+        table.turn = None
+        table.river = None
+        table.current_pot = 0
+        table.save()
+
+        # Distribui cartas e salva no banco
+        for jogador in jogadores:
+            c1 = deck.draw(1)[0]
+            c2 = deck.draw(1)[0]
+            jogador.card1 = Card.int_to_str(c1)
+            jogador.card2 = Card.int_to_str(c2)
+            jogador.save()
+        
+        # Aplica as blinds
+        apply_blinds(table, jogadores)
+
+        # Encontra o jogador da vez
+        ordem = jogadores
+        if len(ordem) == 2:
+            # Heads-up: o botão (BTN) age primeiro no pré-flop
+            jogador_da_vez = next((j for j in ordem if j.position == 'btn'), ordem[0])
+        else:
+            # Mesas com 3+ jogadores: primeiro a agir é o da esquerda do BB
+            idx_bb = next((i for i, j in enumerate(ordem) if j.position == 'bb'), 0)
+            idx_primeiro = (idx_bb + 1) % len(ordem)
+            jogador_da_vez = ordem[idx_primeiro]
+
+        # Cria o token e envia pro jogador da vez
+        token = PlayerTurnToken.objects.create(
+            table=table,
+            player=jogador_da_vez.player,
+            hands_played=table.hands_played,
+            round_stage='preflop'
+        )
+
+        # Envia requests
+        send_turn_to_player(token, [jogador_da_vez.card1, jogador_da_vez.card2])
+        send_broadcast_state(table)
+                
+def send_turn_to_player(token_obj, cartas_privadas):
+    
+    data = {
+        'token': token_obj.token,
+        'table_id': token_obj.table.id,
+        'player_id': token_obj.player.id,
+        'round_stage': token_obj.round_stage,
+        'hands_played': token_obj.hands_played,
+        'your_cards': cartas_privadas
+    }
+
+    print("\n=== [SIMULAÇÃO DE ENVIO PARA CALLBACK] ===")
+    print(f"URL: {token_obj.player.callback_url}")
+    print("Payload:")
+    for key, value in data.items():
+        print(f"  {key}: {value}")
+    print("==========================================")
+
+    # Descomentar para ativar envio real
+    """
+    try:
+        response = requests.post(
+            token_obj.player.callback_url,
+            json=data,
+            timeout=5
+        )
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[Erro] Envio para {token_obj.player.callback_url}: {e}")
+        return False
+    """
+    return True
+
+def send_broadcast_state(table):
+    jogadores = TablePlayer.objects.filter(table=table, is_active=True).order_by('seat_number')
+
+    broadcast_data = {
+        'table_id': table.id,
+        'hands_played': table.hands_played,
+        'current_pot': table.current_pot,
+        'players': [],
+        'stage': 'preflop'
+    }
+
+    for j in jogadores:
+        broadcast_data['players'].append({
+            'name': j.player.name,
+            'seat_number': j.seat_number,
+            'position': j.position,
+            'chips': j.chips,
+            'is_bot': j.player.is_bot
+        })
+
+    for j in jogadores:
+        data = {
+            'type': 'broadcast',
+            'your_cards': [j.card1, j.card2],
+            'btn_seat': next((p.seat_number for p in jogadores if p.position == 'btn'), None),
+            **broadcast_data
+        }
+
+        print(f"\n🎙️ Enviando broadcast para {j.player.name} ({j.player.callback_url})")
+        print(data)
+
+        # Descomente abaixo se quiser ativar envio real
+        """
+        try:
+            requests.post(j.player.callback_url, json=data, timeout=5)
+        except Exception as e:
+            print(f"[Erro] Broadcast para {j.player.name}: {e}")
+        """ 
+
+def assign_positions(table):
+    jogadores = list(
+        TablePlayer.objects.filter(table=table, is_active=True).order_by('seat_number')
+    )
+
+    total = len(jogadores)
+
+    # Limpa todas as posições primeiro
+    for j in jogadores:
+        j.position = '-'
+        j.save()
+
+    if total == 2:
+        # Heads-up: jogador 0 é BTN (que também age como SB implicitamente), jogador 1 é BB
+        jogadores[0].position = 'btn'
+        jogadores[0].save()
+
+        jogadores[1].position = 'bb'
+        jogadores[1].save()
+
+    elif total >= 3:
+        # Define posições padrão em mesa cheia (até 9 players)
+        POSITIONS = ['sb', 'bb', 'utg', 'utg+1', 'utg+2', 'lj', 'hj', 'co', 'btn']
+        ativos = jogadores[:len(POSITIONS)]  # Corta o excesso, se houver
+
+        for i, jogador in enumerate(ativos):
+            jogador.position = POSITIONS[i]
+            jogador.save()
+
+    return jogadores
+
+def apply_blinds(table, jogadores):
+    """
+    Aplica os blinds aos jogadores ativos com base nas posições.
+    Funciona tanto para mesas normais quanto heads-up.
+    """
+    sb_player = next((j for j in jogadores if j.position == 'sb'), None)
+
+    # Se não houver SB, assume que BTN é o SB (caso heads-up)
+    if not sb_player:
+        sb_player = next((j for j in jogadores if j.position == 'btn'), None)
+
+    bb_player = next((j for j in jogadores if j.position == 'bb'), None)
+
+    if sb_player:
+        sb_player.chips -= table.small_blind
+        sb_player.save()
+        table.current_pot += table.small_blind
+        print(f"[BLIND] {sb_player.player.name} pagou SB ({table.small_blind})")
+        
+        ActionState.objects.filter(table=table, player=sb_player.player, stage='preflop')\
+            .update(amount_invested=table.small_blind)
+
+    if bb_player:
+        bb_player.chips -= table.big_blind
+        bb_player.save()
+        table.current_pot += table.big_blind
+        print(f"[BLIND] {bb_player.player.name} pagou BB ({table.big_blind})")
+        
+        ActionState.objects.filter(table=table, player=bb_player.player, stage='preflop')\
+            .update(amount_invested=table.big_blind)
+    
+    table.save()                            
+
+    
+    reset_betting_state(table)    
+    
+def reset_betting_state(table):
+    table.current_bet = table.big_blind
+    table.last_raise_amount = table.big_blind
+    table.save()
+    
+################################################
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def receive_action(request):
+    try:
+        getAccess(request)
+        dados = json.loads(request.body.decode('utf-8'))
+        checkRequiredFields(dados, ['token', 'action', 'amount'])
+
+        token_str = dados.get('token')
+        action = dados.get('action')
+        amount = dados.get('amount', 0)
+
+        token_obj = PlayerTurnToken.objects.filter(token=token_str, is_used=False).first()
+        if not token_obj:
+            return JsonResponse({'status': 400, 'description': 'Token inválido ou expirado'})
+
+        if action == 'raise' and amount <= 0:
+            return JsonResponse({'status': 400, 'description': 'Amount obrigatório para raise'})
+
+        if action in ['fold', 'check', 'call', 'all-in']:
+            amount = 0
+
+        table = token_obj.table
+        player = token_obj.player
+        stage = token_obj.round_stage
+
+        valid_actions = ['fold', 'check', 'call', 'raise', 'all-in']
+        if action not in valid_actions:
+            return JsonResponse({'status': 400, 'description': 'Ação inválida'})
+
+        state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
+
+        with transaction.atomic():
+            to_call = get_to_call(player, table, stage)
+
+            if action == 'fold':
+                table_player = TablePlayer.objects.get(table=table, player=player)
+                table_player.is_in_hand = False
+                table_player.save()
+                update_action(player, table, stage, 0)
+
+            elif action == 'check':
+                if to_call > 0:
+                    return JsonResponse({'status': 400, 'description': 'Não é possível dar CHECK com aposta pendente.'})
+                update_action(player, table, stage, 0)
+
+            elif action == 'call':
+                table_player = TablePlayer.objects.get(table=table, player=player)
+                if table_player.chips < to_call:
+                    return JsonResponse({'status': 400, 'description': 'Fichas insuficientes para call'})
+                table_player = move_chips(player, table, stage, to_call, action, from_player=True)
+
+            elif action == 'raise':
+                table_player = TablePlayer.objects.get(table=table, player=player)
+                min_raise = table.current_bet + table.last_raise_amount
+
+                if amount < min_raise:
+                    return JsonResponse({'status': 400, 'description': f'O mínimo para raise é {min_raise}'})
+                if table_player.chips < amount:
+                    return JsonResponse({'status': 400, 'description': 'Fichas insuficientes para raise'})
+
+                diff = amount - to_call
+                table.last_raise_amount = diff
+                table.current_bet = amount
+                table.save()
+
+                table_player = move_chips(player, table, stage, amount, action, from_player=True)
+                mark_all_need_to_act_except(player, table, stage)
+
+            elif action == 'all-in':
+                table_player = TablePlayer.objects.get(table=table, player=player)
+                investido = state.amount_invested if state else 0
+                allin_amount = table_player.chips + investido
+
+                to_call = get_to_call(player, table, stage)
+                diff = allin_amount - to_call
+
+                if diff > 0:
+                    table.last_raise_amount = diff
+                    table.current_bet = allin_amount
+                    table.save()
+                    mark_all_need_to_act_except(player, table, stage)
+
+                table_player = move_chips(player, table, stage, allin_amount, action, from_player=True)
+                table_player.is_all_in = True
+                table_player.save()
+
+            token_obj.is_used = True
+            token_obj.save()
+
+            GameLog.objects.create(
+                table=table,
+                player=player,
+                log_type='action',
+                round_stage=stage,
+                hands_played=token_obj.hands_played,
+                message=f"{player.name} fez {action.upper()} ({amount})",
+                json_data=dados
+            )
+
+            verifica_proximo_turno(table, stage)
+
+            return JsonResponse({
+                'status': 200,
+                'description': f"Ação '{action}' registrada com sucesso",
+                'pot': table.current_pot,
+                'player_chips': table_player.chips
+            })
+
+    except Exception as e:
+        return JsonResponse({'status': 500, 'description': str(e)})
+
+
+
+def get_to_call(player, table, stage):
+    state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
+    if not state:
+        return 0
+    return max(table.current_bet - state.amount_invested, 0)
+
+def mark_all_need_to_act_except(raiser, table, stage):
+    ActionState.objects.filter(table=table, stage=stage).exclude(player=raiser).update(needs_to_act=True)
+
+def reset_action_state_for_stage(table, stage):
+    ActionState.objects.filter(table=table, stage=stage).delete()
+    ativos = TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True)
+    ActionState.objects.bulk_create([
+        ActionState(table=table, player=tp.player, stage=stage, needs_to_act=True, amount_invested=0)
+        for tp in ativos
+    ])
+
+def is_betting_round_complete(table, stage):
+    return not ActionState.objects.filter(table=table, stage=stage, needs_to_act=True).exists()
+
+# Opcional: atualiza o valor investido e marca como agido
+def update_action(player, table, stage, amount):
+    state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
+    if state:
+        state.amount_invested += amount
+        state.needs_to_act = False
+        state.save()
+
+def move_chips(player, table, stage, amount, action, *, from_player=True):
+    """
+    Move fichas entre jogador e pot, atualiza chips, pot e ActionState.
+
+    - from_player=True → jogador paga (diminui de chips, aumenta no pot)
+    - from_player=False → jogador recebe (aumenta chips, diminui do pot)
+
+    Retorna: TablePlayer atualizado
+    """
+    if amount <= 0:
+        return TablePlayer.objects.get(table=table, player=player)
+
+    table_player = TablePlayer.objects.get(table=table, player=player)
+    state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
+
+    if from_player:
+        if action == 'raise':
+            if state:
+                table.current_pot -= state.amount_invested
+                table_player.chips += state.amount_invested
+                state.amount_invested = 0
+                state.save()
+                table_player.save()
+                table.save()
+
+        if action == 'all-in':
+            if not state:
+                return table_player
+
+            table.current_pot -= state.amount_invested
+            table_player.chips += state.amount_invested
+            state.amount_invested = 0
+
+            allin_total = table_player.chips
+            table.current_pot += allin_total
+            state.amount_invested = allin_total
+            state.needs_to_act = False
+
+            table_player.chips = 0
+
+            state.save()
+            table_player.save()
+            table.save()
+            return table_player
+
+        table_player.chips -= amount
+        table.current_pot += amount
+        update_action(player, table, stage, amount)
+
+    else:
+        table_player.chips += amount
+        table.current_pot -= amount
+
+    table_player.save()
+    table.save()
+    return table_player
+
+def verifica_proximo_turno(table, stage):
+    try:
+        state = ActionState.objects.filter(table=table, stage=stage, needs_to_act=True).first()
+        if not state:
+            print("🏁 Rodada de apostas encerrada.")
+            return  # ou aqui você chama a próxima street depois
+
+        jogador = TablePlayer.objects.filter(table=table, player=state.player).first()
+        if not jogador or not jogador.is_active or not jogador.is_in_hand:
+            state.needs_to_act = False
+            state.save()
+            return verifica_proximo_turno(table, stage)
+
+        token = PlayerTurnToken.objects.create(
+            table=table,
+            player=jogador.player,
+            hands_played=table.hands_played,
+            round_stage=stage
+        )
+
+        send_turn_to_player(token, [jogador.card1, jogador.card2])
+    except Exception as e:
+        print(f"Erro ao gerar próximo turno: {e}")
+
+
 
