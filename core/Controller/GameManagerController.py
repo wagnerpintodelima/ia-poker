@@ -364,6 +364,10 @@ def setup_hand(table):
             jogador.card2 = Card.int_to_str(c2)
             jogador.save()
         
+        # Salva o deck no banco
+        table.deck = [Card.int_to_str(c) for c in deck.cards]  # salva o baralho restante como strings
+        table.save()
+        
         # Aplica as blinds
         apply_blinds(table, jogadores)
 
@@ -581,6 +585,7 @@ def receive_action(request):
                 if to_call > 0:
                     return JsonResponse({'status': 400, 'description': 'Não é possível dar CHECK com aposta pendente.'})
                 update_action(player, table, stage, 0)
+                table_player = TablePlayer.objects.get(table=table, player=player)
 
             elif action == 'call':
                 table_player = TablePlayer.objects.get(table=table, player=player)
@@ -637,6 +642,7 @@ def receive_action(request):
             )
 
             verifica_proximo_turno(table, stage)
+            resolve_end_of_round(table, stage)
 
             return JsonResponse({
                 'status': 200,
@@ -647,8 +653,6 @@ def receive_action(request):
 
     except Exception as e:
         return JsonResponse({'status': 500, 'description': str(e)})
-
-
 
 def get_to_call(player, table, stage):
     state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
@@ -759,5 +763,162 @@ def verifica_proximo_turno(table, stage):
     except Exception as e:
         print(f"Erro ao gerar próximo turno: {e}")
 
+def resolve_end_of_round(table, stage):
+    """Verifica o estágio atual e avança para o próximo."""     
+    if stage == 'preflop':
+        deal_flop(table)
+    elif stage == 'flop':
+        deal_turn(table)
+    elif stage == 'turn':
+        deal_river(table)
+    elif stage == 'river':
+        # TODO: implementar showdown futuramente
+        GameLog.objects.create(
+            table=table,
+            player=None,
+            log_type='round',
+            round_stage='river',
+            hands_played=table.hands_played,
+            message='🏁 Rodada de apostas encerrada (pré-showdown)',
+            json_data={}
+        )
+
+def reset_for_new_hand(table):
+    # Atualizar contagem de mãos
+    table.hands_played += 1
+    table.current_bet = 0
+    table.last_raise_amount = 0
+    table.current_pot = 0
+    table.save()
+
+    # Atualizar jogadores na mesa
+    for player in TablePlayer.objects.filter(table=table):
+        player.is_in_hand = True
+        player.is_all_in = False
+        player.card1 = None
+        player.card2 = None
+        player.save()
+
+    # Resetar ActionState
+    for state in ActionState.objects.filter(table=table):
+        state.amount_invested = 0
+        state.needs_to_act = True
+        state.save()
+
+    # TODO: Avaliar se as blinds devem aumentar com base em algum critério
+
+def deal_flop(table):
+    """Distribui o flop (3 cartas) e atualiza o deck na tabela."""
+    deck_list = table.deck or []
+    deck = Deck()
+    deck.cards = [Card.new(s) for s in deck_list if s]  # Garante que não haja strings vazias
+
+    if len(deck.cards) < 3:
+        raise ValueError("Deck não contém cartas suficientes para o flop.")
+
+    table.flop1 = Card.int_to_str(deck.draw(1)[0])
+    table.flop2 = Card.int_to_str(deck.draw(1)[0])
+    table.flop3 = Card.int_to_str(deck.draw(1)[0])
+    table.round_stage = 'flop'
+
+    table.deck = [Card.int_to_str(c) for c in deck.cards]
+    table.save()
+
+    GameLog.objects.create(
+        table=table,
+        player=None,
+        log_type='round',
+        round_stage='flop',
+        hands_played=table.hands_played,
+        message='🟩 Flop distribuído',
+        json_data={'flop': [table.flop1, table.flop2, table.flop3]}
+    )
+
+    ActionState.objects.filter(table=table).delete()
+
+    for jogador in TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True):
+        ActionState.objects.create(
+            table=table,
+            player=jogador.player,
+            stage='flop',
+            amount_invested=0,
+            needs_to_act=True
+        )
+
+    verifica_proximo_turno(table, 'flop')
+
+def deal_turn(table):
+    """Distribui o turn (1 carta) e atualiza o deck na tabela."""
+    deck_list = table.deck or []
+    deck = Deck()
+    deck.cards = [Card.new(s) for s in deck_list if s]
+
+    if len(deck.cards) < 1:
+        raise ValueError("Deck não contém cartas suficientes para o turn.")
+
+    table.turn = Card.int_to_str(deck.draw(1)[0])
+    table.round_stage = 'turn'
+    table.deck = [Card.int_to_str(c) for c in deck.cards]
+    table.save()
+
+    GameLog.objects.create(
+        table=table,
+        player=None,
+        log_type='round',
+        round_stage='turn',
+        hands_played=table.hands_played,
+        message='🟧 Turn distribuído',
+        json_data={'turn': table.turn}
+    )
+
+    ActionState.objects.filter(table=table).delete()
+
+    for jogador in TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True):
+        ActionState.objects.create(
+            table=table,
+            player=jogador.player,
+            stage='turn',
+            amount_invested=0,
+            needs_to_act=True
+        )
+
+    verifica_proximo_turno(table, 'turn')
+
+def deal_river(table):
+    """Distribui o river (1 carta) e atualiza o deck na tabela."""
+    deck_list = table.deck or []
+    deck = Deck()
+    deck.cards = [Card.new(s) for s in deck_list if s]
+
+    if len(deck.cards) < 1:
+        raise ValueError("Deck não contém cartas suficientes para o river.")
+
+    table.river = Card.int_to_str(deck.draw(1)[0])
+    table.round_stage = 'river'
+    table.deck = [Card.int_to_str(c) for c in deck.cards]
+    table.save()
+
+    GameLog.objects.create(
+        table=table,
+        player=None,
+        log_type='round',
+        round_stage='river',
+        hands_played=table.hands_played,
+        message='🟥 River distribuído',
+        json_data={'river': table.river}
+    )
+
+    ActionState.objects.filter(table=table).delete()
+
+    for jogador in TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True):
+        ActionState.objects.create(
+            table=table,
+            player=jogador.player,
+            stage='river',
+            amount_invested=0,
+            needs_to_act=True
+        )
+
+    verifica_proximo_turno(table, 'river')
 
 

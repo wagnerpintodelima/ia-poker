@@ -63,6 +63,8 @@ class Table(models.Model):
         help_text="Intervalo para aumentar as blinds (segundos ou número de mãos)"
     )
     
+    deck = models.TextField(blank=True, null=True)
+    
     flop1 = models.CharField(max_length=3, blank=True, null=True)
     flop2 = models.CharField(max_length=3, blank=True, null=True)
     flop3 = models.CharField(max_length=3, blank=True, null=True)
