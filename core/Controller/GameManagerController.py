@@ -169,7 +169,7 @@ def treys_tour(request):
 
     return JsonResponse(result)
 
-###############ROTINA START#####################
+#######################################################ROTINA START#####################
     
 @csrf_exempt
 @require_http_methods(["POST"])
@@ -539,7 +539,7 @@ def reset_betting_state(table):
     table.last_raise_amount = table.big_blind
     table.save()
     
-################################################
+####################################################################################
 
 @csrf_exempt
 @require_http_methods(["POST"])
@@ -571,8 +571,10 @@ def receive_action(request):
         if action not in valid_actions:
             return JsonResponse({'status': 400, 'description': 'Ação inválida'})
         
-        with transaction.atomic():
-            
+        with transaction.atomic():                        
+
+            pote_inicial = table.current_pot # Isso usa apenas para log
+
             to_call = get_to_call(player, table, stage)
             state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
             table_player = TablePlayer.objects.get(table=table, player=player)            
@@ -616,19 +618,19 @@ def receive_action(request):
                     return JsonResponse({'status': 400, 'description': f'O mínimo para raise é {min_raise}'})
                 if table_player.chips < amount:
                     return JsonResponse({'status': 400, 'description': 'Fichas insuficientes para raise'})
-
-                # Atualizo a table
-                diff = amount - to_call
-                table.last_raise_amount = diff
-                table.current_bet = amount                
-
-                # Atualiza pot
-                table.current_pot += diff
-                table_player.chips -= diff
                 
+                valor_total = amount
+                investido = state.amount_invested if state else 0
+                to_pagar = valor_total - investido  # quanto falta para ele atingir o amount declarado
+
+                table.last_raise_amount = amount - table.current_bet
+                table.current_bet = amount
+
+                table.current_pot += to_pagar
+                table_player.chips -= to_pagar
+                state.amount_invested = valor_total
                 state.needs_to_act = False
-                state.amount_invested += diff
-                
+
                 table.save()
                 state.save()
                 table_player.save()
@@ -667,7 +669,7 @@ def receive_action(request):
                 log_type='action',
                 round_stage=stage,
                 hands_played=token_obj.hands_played,
-                message=f"{player.name} fez {action.upper()} ({amount})",
+                message=f"{player.name} fez {action.upper()} ({amount}) Pote Inicial: {pote_inicial}, Pote Final: {table.current_pot}",
                 json_data=dados
             )
 
@@ -675,18 +677,26 @@ def receive_action(request):
 
             return JsonResponse({
                 'status': 200,
+                'position': table_player.position,
                 'description': f"Ação '{action}' registrada com sucesso",
                 'pot': table.current_pot,
-                'player_chips': table_player.chips
+                'player_chips': table_player.chips,
+                'min_raise': table.last_raise_amount,
+                'current_bet': table.current_bet,
+                'board': [table.flop1,table.flop2,table.flop3,table.turn,table.river],
+                'hero': [table_player.card1,table_player.card2]
             })
 
     except Exception as e:
         return JsonResponse({'status': 500, 'description': str(e)})
 
 def get_to_call(player, table, stage):
-    state = ActionState.objects.filter(player=player, table=table, stage=stage).first()
+
+    state = ActionState.objects.filter(player=player, table=table, stage=stage).first()    
+
     if not state:
         return 0
+
     return max(table.current_bet - state.amount_invested, 0)
 
 def reset_action_state_for_stage(table, stage):
@@ -709,6 +719,7 @@ def verifica_proximo_turno(table, stage):
             resolve_end_of_round(table, stage)
 
         jogador = TablePlayer.objects.filter(table=table, player=state.player).first()
+        
         if not jogador or not jogador.is_active or not jogador.is_in_hand:
             state.needs_to_act = False
             state.save()
@@ -956,4 +967,7 @@ def reset_for_new_hand(table):
 
     # TODO: Avaliar se as blinds devem aumentar com base em algum critério
 
+####################################################################################      
+      
+      
       
