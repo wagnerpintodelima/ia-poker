@@ -570,9 +570,7 @@ def receive_action(request):
         valid_actions = ['fold', 'check', 'call', 'raise', 'all-in']
         if action not in valid_actions:
             return JsonResponse({'status': 400, 'description': 'Ação inválida'})
-
         
-
         with transaction.atomic():
             
             to_call = get_to_call(player, table, stage)
@@ -638,7 +636,7 @@ def receive_action(request):
                 mark_all_need_to_act_except(player, table, stage)
 
             elif action == 'all-in':
-                
+
                 investido = state.amount_invested if state else 0
                 allin_amount = table_player.chips + investido                
                 diff = allin_amount - to_call
@@ -648,12 +646,12 @@ def receive_action(request):
                     table.current_bet = allin_amount
                     table.save()
                     mark_all_need_to_act_except(player, table, stage)                
-                
+
                 # Atualiza pot
                 table.current_pot += diff
                 table_player.chips -= diff
                 table_player.is_all_in = True
-                
+
                 state.needs_to_act = False
                 state.amount_invested += diff
                 state.save()                
@@ -705,9 +703,10 @@ def mark_all_need_to_act_except(raiser, table, stage):
 def verifica_proximo_turno(table, stage):
     try:
         state = ActionState.objects.filter(table=table, stage=stage, needs_to_act=True).first()
+        
         if not state:
             print(fr"🏁 ({stage}) Rodada de apostas encerrada.")
-            return  # ou aqui você chama a próxima street depois
+            resolve_end_of_round(table, stage)
 
         jogador = TablePlayer.objects.filter(table=table, player=state.player).first()
         if not jogador or not jogador.is_active or not jogador.is_in_hand:
@@ -725,3 +724,236 @@ def verifica_proximo_turno(table, stage):
         send_turn_to_player(token, [jogador.card1, jogador.card2])
     except Exception as e:
         print(f"Erro ao gerar próximo turno: {e}")    
+        
+def resolve_end_of_round(table, stage):
+    """Verifica o estágio atual e avança para o próximo."""     
+    if stage == 'preflop':
+        deal_flop(table)
+    elif stage == 'flop':        
+        deal_turn(table)
+    elif stage == 'turn':
+        deal_river(table)        
+    elif stage == 'river':            
+        # Showdown
+        showdown(table)
+        
+        GameLog.objects.create(
+            table=table,
+            player=None,
+            log_type='round',
+            round_stage='river',
+            hands_played=table.hands_played,
+            message='🏁 Rodada de apostas encerrada (pré-showdown)',
+            json_data={}
+        )        
+
+def deal_flop(table):
+    """Distribui o flop (3 cartas) e atualiza o deck na tabela."""
+    deck_list = ast.literal_eval(table.deck) if isinstance(table.deck, str) else table.deck or []
+    deck = Deck()
+    deck.cards = [Card.new(s) for s in deck_list if isinstance(s, str) and len(s) == 2]
+
+    if len(deck.cards) < 3:
+        raise ValueError("Deck não contém cartas suficientes para o flop.")
+
+    table.flop1 = Card.int_to_str(deck.draw(1)[0])
+    table.flop2 = Card.int_to_str(deck.draw(1)[0])
+    table.flop3 = Card.int_to_str(deck.draw(1)[0])
+    table.round_stage = 'flop'
+    
+    # Zera a aposta atual
+    table.current_bet = 0
+    table.deck = [Card.int_to_str(c) for c in deck.cards]
+    table.save()
+
+    GameLog.objects.create(
+        table=table,
+        player=None,
+        log_type='round',
+        round_stage='flop',
+        hands_played=table.hands_played,
+        message='🟩 Flop distribuído',
+        json_data={'flop': [table.flop1, table.flop2, table.flop3]}
+    )
+
+    ActionState.objects.filter(table=table).delete()
+
+    for jogador in TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True):
+        ActionState.objects.create(
+            table=table,
+            player=jogador.player,
+            stage='flop',
+            amount_invested=0,
+            needs_to_act=True
+        )
+
+    verifica_proximo_turno(table, 'flop')    
+            
+def deal_turn(table):
+    """Distribui o turn (1 carta) e atualiza o deck na tabela."""
+    deck_list = ast.literal_eval(table.deck) if isinstance(table.deck, str) else table.deck or []
+    deck = Deck()
+    deck.cards = [Card.new(s) for s in deck_list if isinstance(s, str) and len(s) == 2]
+
+    if len(deck.cards) < 1:
+        raise ValueError("Deck não contém cartas suficientes para o turn.")
+
+    table.turn = Card.int_to_str(deck.draw(1)[0])    
+    table.round_stage = 'turn'
+    
+    # Zera a aposta atual
+    table.current_bet = 0
+    table.deck = [Card.int_to_str(c) for c in deck.cards]
+    table.save()
+
+    GameLog.objects.create(
+        table=table,
+        player=None,
+        log_type='round',
+        round_stage='turn',
+        hands_played=table.hands_played,
+        message='🟧 Turn distribuído',
+        json_data={'turn': table.turn}
+    )
+
+    ActionState.objects.filter(table=table).delete()
+
+    for jogador in TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True):
+        ActionState.objects.create(
+            table=table,
+            player=jogador.player,
+            stage='turn',
+            amount_invested=0,
+            needs_to_act=True
+        )
+
+    verifica_proximo_turno(table, 'turn')         
+    
+def deal_river(table):
+    """Distribui o turn (1 carta) e atualiza o deck na tabela."""
+    deck_list = ast.literal_eval(table.deck) if isinstance(table.deck, str) else table.deck or []
+    deck = Deck()
+    deck.cards = [Card.new(s) for s in deck_list if isinstance(s, str) and len(s) == 2]
+
+    if len(deck.cards) < 1:
+        raise ValueError("Deck não contém cartas suficientes para o turn.")
+
+    table.river = Card.int_to_str(deck.draw(1)[0])    
+    table.round_stage = 'river'
+    
+    # Zera a aposta atual
+    table.current_bet = 0
+    table.deck = [Card.int_to_str(c) for c in deck.cards]
+    table.save()
+
+    GameLog.objects.create(
+        table=table,
+        player=None,
+        log_type='round',
+        round_stage='river',
+        hands_played=table.hands_played,
+        message='🟧 River distribuído',
+        json_data={'river': table.river}
+    )
+
+    ActionState.objects.filter(table=table).delete()
+
+    for jogador in TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True):
+        ActionState.objects.create(
+            table=table,
+            player=jogador.player,
+            stage='river',
+            amount_invested=0,
+            needs_to_act=True
+        )
+
+    verifica_proximo_turno(table, 'river')  
+
+def showdown(table):
+
+    evaluator = Evaluator()
+
+    board = [
+        Card.new(table.flop1),
+        Card.new(table.flop2),
+        Card.new(table.flop3),
+        Card.new(table.turn),
+        Card.new(table.river)
+    ]
+
+    ativos = TablePlayer.objects.filter(table=table, is_active=True, is_in_hand=True)
+
+    resultados = []
+
+    for jogador in ativos:
+        mao = [Card.new(jogador.card1), Card.new(jogador.card2)]
+        score = evaluator.evaluate(board, mao)
+        descricao = evaluator.class_to_string(evaluator.get_rank_class(score))
+        resultados.append({
+            'jogador': jogador,
+            'score': score,
+            'descricao': descricao,
+            'mao': mao
+        })
+
+    if not resultados:
+        return  # Nenhum jogador elegível
+
+    menor_score = min(r['score'] for r in resultados)
+    vencedores = [r for r in resultados if r['score'] == menor_score]
+    premio = table.current_pot // len(vencedores)
+
+    for vencedor in vencedores:
+        vencedor['jogador'].chips += premio
+        vencedor['jogador'].save()
+
+        GameLog.objects.create(
+            table=table,
+            player=vencedor['jogador'].player,
+            log_type='win',
+            round_stage='showdown',
+            hands_played=table.hands_played,
+            message=f"🏆 {vencedor['jogador'].player.name} venceu com {vencedor['descricao']}",
+            json_data={
+                'board': [table.flop1, table.flop2, table.flop3, table.turn, table.river],
+                'hand': [vencedor['jogador'].card1, vencedor['jogador'].card2],
+                'score': vencedor['score'],
+                'mao_descricao': vencedor['descricao']
+            }
+        )    
+
+    # Aqui pode resetar mesa ou preparar nova mão
+    reset_for_new_hand(table)    
+    
+def reset_for_new_hand(table):    
+    
+    table.hands_played += 1
+    table.current_bet = 0
+    table.last_raise_amount = 0
+    table.current_pot = 0
+    table.flop1 = None
+    table.flop2 = None
+    table.flop3 = None
+    table.turn = None
+    table.river = None
+    table.save()
+
+    # Atualizar jogadores na mesa
+    for player in TablePlayer.objects.filter(table=table, is_eliminated=False):
+        if player.chips > 0:
+            player.is_in_hand = True            
+        else:
+            player.is_in_hand = False
+            player.is_eliminated = True
+            print(fr'❌ Jogador {player.id} foi eliminado.')
+        
+        player.is_all_in = False
+        player.card1 = None
+        player.card2 = None
+        player.save()    
+        
+    ActionState.objects.filter(table=table).delete()
+
+    # TODO: Avaliar se as blinds devem aumentar com base em algum critério
+
+      
