@@ -6,10 +6,12 @@ urlpatterns = [
     path('player/new', api.newPlayer, name="ApiPlayerNew"),                 # Admin
     path('player/find', api.getPlayer, name="ApiPlayerFind"),               # System
     path('player/list', api.getPlayers, name="ApiPlayerList"),              # Admin
+    path('player/data', api.getDataPlayer, name="ApiPlayerData"),           # System
 
     path('table/new', gmc.newTable, name="GameNewTable"),                   # Admin
     path('table/list', gmc.getTables, name="GameListTable"),                # System
     path('table/join', gmc.joinTable, name="GameJoinTable"),                # System
+    path('table/players', api.getPlayerOfTable, name="GetPalyersOfTable"),  # System
 
     path('get/hash', api.showHash, name="ApiGetHash"),                      # PUBLIC - Oh My GOD
     path('gen/hash', api.genHash, name="ApiGenHash"),                       # Admin

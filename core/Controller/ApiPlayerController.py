@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.utils import timezone
 from core.Controller.BaseController import getHash, getAccess, getAccessAdmin, checkRequiredFields
-from core.models import Player
+from core.models import Player, TablePlayer, ActionState, PlayerTurnToken, Table
 from django.db.models import Q
 from django.db import transaction
 
@@ -195,3 +195,139 @@ def getPlayers(request):
 
 
     return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
+
+@csrf_exempt
+@require_http_methods(["GET"])
+def getDataPlayer(request):
+    
+    try:
+        dados = json.loads(request.body.decode('utf-8'))
+        getAccess(request)
+        
+        checkRequiredFields(dados, ['secret_key'])
+        
+        # Acessando um valor específico | {"deviceNumber":"cf916da6509da698be4854f789b26c01","version": "v4.3.2"}
+        secret_key = dados.get('secret_key', None)        
+        
+        player = Player.objects.get(secret_key=secret_key)        
+    
+        return JsonResponse(getDataPlayerGeneric(player))
+
+    except Exception as e:
+        context = {
+            'status': 500,
+            'description': str(e)
+        }
+
+    return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def getPlayerOfTable(request):
+    
+    try:
+        dados = json.loads(request.body.decode('utf-8'))
+        getAccess(request)
+        
+        checkRequiredFields(dados, ['table_id'])
+        
+        # Acessando um valor específico | {"deviceNumber":"cf916da6509da698be4854f789b26c01","version": "v4.3.2"}
+        table_id = dados.get('table_id', None)        
+        
+        player_table = TablePlayer.objects.filter(table__id=table_id, table__status='active')
+        data = []
+        
+        if player_table:
+            for pt in player_table:
+                data.append(getDataPlayerGeneric(pt.player))
+            
+            return JsonResponse(data, safe=False)
+        else:
+            return JsonResponse({
+                'status': 400,
+                'description': 'Mesa não encontrada'
+            })                            
+
+    except Exception as e:
+        context = {
+            'status': 500,
+            'description': str(e)
+        }
+
+    return HttpResponse(json.dumps(context, ensure_ascii=False), content_type="application/json")
+
+# Essa aqui re-aproveito ela para retornar via mqtt, mantém o mesmo padrão nas duas vias
+def getDataPlayerGeneric(player):    
+    
+    try:                                        
+        data = TablePlayer.objects.filter(player=player, table__status='active').first()
+
+        if data:    
+            
+            token = PlayerTurnToken.objects.filter(player=data.player, table=data.table, is_used=False).first()
+            token_data = None
+            if token:
+                token_data = {
+                    'id': token.id,
+                    'round_stage': token.round_stage,
+                    'token': token.token
+                }
+            
+            action = ActionState.objects.filter(player=data.player, table=data.table).first()
+            action_data = None
+            if action:
+                action_data = {
+                    'id': action.id,
+                    'stage': action.stage,
+                    'need_to_act': action.needs_to_act,
+                    'amount_invested': action.amount_invested
+                }
+            
+            return {
+                'status': 200,                
+                'player': {
+                    'id': data.player.id,
+                    'position': data.get_position_display(),
+                    'name': data.player.name,
+                    'email': data.player.email,
+                    'card1': data.card1,
+                    'card2': data.card2,
+                },
+                'table': {
+                    'id': data.table.id,
+                    'name': data.table.name,
+                    'max_players': data.table.max_players,
+                    'initial_chips': data.table.initial_chips,
+                    'small_blind': data.table.small_blind,
+                    'big_blind': data.table.big_blind,
+                    'blind_strategy': data.table.get_blind_strategy_display(),
+                    'blind_interval': data.table.blind_interval,
+                    'flop1': data.table.flop1,
+                    'flop2': data.table.flop2,
+                    'flop3': data.table.flop3,
+                    'turn': data.table.turn,
+                    'river': data.table.river,
+                    'current_pot': data.table.current_pot,
+                    'current_bet': data.table.current_bet,
+                    'last_raise_amount': data.table.last_raise_amount,
+                    'hands_played': data.table.hands_played,
+                    'status': data.table.get_status_display(),
+                },
+                'token': token_data,
+                'action_state': action_data
+            }
+        else:
+            return {
+                'status': 400,
+                'description': 'Esse player não está em nenhuma mesa no momento'
+            }
+
+    except Exception as e:
+        return {
+            'status': 500,
+            'description': str(e)
+        }
+
+
+    
+

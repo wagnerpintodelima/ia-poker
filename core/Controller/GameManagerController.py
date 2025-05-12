@@ -18,10 +18,13 @@ from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
 from django.utils import timezone
 from core.Controller.BaseController import getHash, getAccess, getAccessAdmin, checkRequiredFields
+from core.Controller.MQTTController import mqttSendDataToDevice
+from core.Controller.ApiPlayerController import getDataPlayerGeneric
 from core.models import Player, Table, TablePlayer, GameLog, PlayerTurnToken, ActionState
 from django.db.models import Q
 import datetime
 from django.db import transaction
+
 
 
 @csrf_exempt
@@ -398,13 +401,15 @@ def setup_hand(table):
 def send_turn_to_player(token_obj, cartas_privadas):
     
     data = {
-        'token': token_obj.token,
+        'token': str(token_obj.token),
         'table_id': token_obj.table.id,
         'player_id': token_obj.player.id,
         'round_stage': token_obj.round_stage,
         'hands_played': token_obj.hands_played,
         'your_cards': cartas_privadas
     }
+    
+    mqttSendDataToDevice(json.dumps(getDataPlayerGeneric(token_obj.player)))
 
     print("\n=== [SIMULAÇÃO DE ENVIO PARA CALLBACK] ===")
     print(f"URL: {token_obj.player.callback_url}")
@@ -413,6 +418,8 @@ def send_turn_to_player(token_obj, cartas_privadas):
         print(f"  {key}: {value}")
     print("==========================================")
 
+    
+    
     # Descomentar para ativar envio real
     """
     try:
